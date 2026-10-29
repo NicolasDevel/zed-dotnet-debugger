@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "required": ["request"],
+  "properties": {
+    "request": {
+      "type": "string",
+      "enum": ["launch", "attach"],
+      "description": "Launch a .NET program or attach to a running process."
+    },
+    "program": {
+      "type": "string",
+      "description": "Path to the compiled .dll (e.g. bin/Debug/net10.0/MyApp.dll)."
+    },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Command line arguments passed to the program."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory of the program (usually the project directory)."
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Environment variables for the program."
+    },
+    "stopAtEntry": {
+      "type": "boolean",
+      "default": false,
+      "description": "Stop at the program entry point."
+    },
+    "justMyCode": {
+      "type": "boolean",
+      "default": true,
+      "description": "Only step through user code."
+    },
+    "enableStepFiltering": {
+      "type": "boolean",
+      "default": true,
+      "description": "Step over properties and operators."
+    },
+    "processId": {
+      "type": ["integer", "string"],
+      "description": "Process id to attach to (request: attach). Use \"$ZED_PICK_PID\" to pick one."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "request": { "const": "launch" } } },
+      "then": { "required": ["program"] }
+    },
+    {
+      "if": { "properties": { "request": { "const": "attach" } } },
+      "then": { "required": ["processId"] }
+    }
+  ]
+}

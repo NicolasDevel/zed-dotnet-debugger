@@ -1,0 +1,22 @@
+id = "dotnet-debugger"
+name = ".NET Debugger"
+version = "0.1.0"
+schema_version = 1
+authors = ["Nicolas Sabogal <nicolassabogal85@gmail.com>"]
+description = "Debug .NET (C#/F#) projects with netcoredbg, plus run/watch/stop tasks."
+repository = "https://github.com/NicolasDevel/zed-dotnet-debugger"
+
+[debug_adapters.netcoredbg]
+
+[debug_locators.dotnet]
+
+# The locator asks MSBuild for the project's TargetPath when a debug session starts.
+[[capabilities]]
+kind = "process:exec"
+command = "sh"
+args = ["**"]
+
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["Samsung", "netcoredbg", "**"]

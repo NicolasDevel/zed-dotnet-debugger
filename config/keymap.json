@@ -1,0 +1,32 @@
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "f5": "debugger::Start",
+      "cmd-alt-shift-r": [
+        "task::Spawn",
+        {
+          "task_name": "dotnet: run"
+        }
+      ],
+      "cmd-alt-shift-w": [
+        "task::Spawn",
+        {
+          "task_name": "dotnet: watch (hot reload)"
+        }
+      ],
+      "cmd-alt-shift-x": [
+        "task::Spawn",
+        {
+          "task_name": "dotnet: stop"
+        }
+      ],
+      "cmd-alt-shift-b": [
+        "task::Spawn",
+        {
+          "task_name": "dotnet: build"
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,67 @@
+[
+  {
+    "label": "dotnet: run",
+    "command": "sh",
+    "args": [
+      "__SCRIPT__",
+      "run",
+      "$ZED_WORKTREE_ROOT"
+    ],
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true,
+    "reveal": "always",
+    "tags": [
+      "dotnet"
+    ]
+  },
+  {
+    "label": "dotnet: watch (hot reload)",
+    "command": "sh",
+    "args": [
+      "__SCRIPT__",
+      "watch",
+      "$ZED_WORKTREE_ROOT"
+    ],
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true,
+    "reveal": "always",
+    "tags": [
+      "dotnet"
+    ]
+  },
+  {
+    "label": "dotnet: stop",
+    "command": "sh",
+    "args": [
+      "__SCRIPT__",
+      "stop",
+      "$ZED_WORKTREE_ROOT"
+    ],
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true,
+    "reveal": "never",
+    "hide": "on_success",
+    "tags": [
+      "dotnet"
+    ]
+  },
+  {
+    "label": "dotnet: build",
+    "command": "sh",
+    "args": [
+      "__SCRIPT__",
+      "build",
+      "$ZED_WORKTREE_ROOT"
+    ],
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true,
+    "reveal": "always",
+    "tags": [
+      "dotnet"
+    ]
+  }
+]
