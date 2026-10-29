@@ -10,12 +10,6 @@ repository = "https://github.com/NicolasDevel/zed-dotnet-debugger"
 
 [debug_locators.dotnet]
 
-# The locator asks MSBuild for the project's TargetPath when a debug session starts.
-[[capabilities]]
-kind = "process:exec"
-command = "sh"
-args = ["**"]
-
 [[capabilities]]
 kind = "download_file"
 host = "github.com"

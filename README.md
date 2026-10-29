@@ -4,27 +4,21 @@ Run, stop, restart and debug .NET (C# / F#) projects in [Zed](https://zed.dev), 
 
 - **Debug adapter `netcoredbg`** — Samsung's open-source .NET debugger. Downloaded automatically on first use
   (macOS arm64/x64, Linux arm64/x64, Windows x64), or the one on your `PATH` is used.
-- **Debug locator `dotnet`** — turns the `dotnet: run` task into a debug session: builds in Debug, asks MSBuild
-  for the output `.dll`, and launches it under netcoredbg. Environment variables, `applicationUrl` and
-  `commandLineArgs` are taken from the first `Project` profile in `Properties/launchSettings.json`,
-  like Visual Studio does.
-- **Run / watch / stop / build tasks** and **keybindings**, installed by `install.sh`.
+- **Debug locator `dotnet`** — turns any `dotnet run`, `dotnet watch` or `dotnet build` task into a debug
+  session: it builds the project in Debug, MSBuild reports the output `.dll`, and netcoredbg launches it.
+- **launchSettings.json** — environment variables, `applicationUrl` and `commandLineArgs` come from the first
+  `Project` profile in `Properties/launchSettings.json` (or the one picked with `--launch-profile`), like
+  `dotnet run` and Visual Studio.
+- **Optional run / watch / stop / build tasks and keybindings**, installed by `install.sh`.
+
+Requires the .NET SDK 8 or newer (projects may target older frameworks). The extension runs no commands of its own:
+it only downloads netcoredbg from GitHub.
 
 ## Install
 
-1. Install the extension. Until it is in the registry: `zed: install dev extension` and pick this folder
-   (needs Rust via `rustup`, with `rustc` on Zed's `PATH`).
-2. Install the tasks, helper script and keybindings:
-
-   ```sh
-   ./install.sh
-   ```
-
-   It copies `scripts/dotnet-zed.sh` to `~/.config/zed/dotnet/` and merges the entries from `config/` into
-   `~/.config/zed/tasks.json` and `~/.config/zed/keymap.json`. Re-running it replaces its own entries and
-   leaves everything else alone.
-
-3. Make netcoredbg the debugger for C# in `settings.json`:
+1. Install **.NET Debugger** from `zed: extensions` (or, from source, `zed: install dev extension` and pick
+   this folder; that needs Rust via `rustup`).
+2. Make netcoredbg the debugger for C# in `settings.json`:
 
    ```jsonc
    "languages": {
@@ -32,10 +26,28 @@ Run, stop, restart and debug .NET (C# / F#) projects in [Zed](https://zed.dev), 
    }
    ```
 
+That is enough to debug: press `F5`, open the **Launch** tab and enter the path to a `.csproj` — it is built and
+debugged. Every `dotnet run` / `watch` / `build` task also shows up in the **Debug** tab as `Debug: <task>`, for
+example from `.zed/tasks.json`:
+
+```jsonc
+[{ "label": "dotnet run", "command": "dotnet", "args": ["run", "--project", "src/Api"] }]
+```
+
+### Optional: tasks and keybindings
+
+```sh
+./install.sh
+```
+
+It copies `scripts/dotnet-zed.sh` to `~/.config/zed/dotnet/` and merges `config/tasks.json` and
+`config/keymap.json` into `~/.config/zed/`. These tasks find the project from the open file, and `run` restarts
+the app if it is already running. Re-running the script replaces its own entries and leaves the rest alone.
+
 ## Usage
 
-Keep a `.cs` file focused: the project is resolved from it, and Zed only offers the C# debugger when the active
-file is C#.
+Keep a `.cs` file focused: Zed only offers the C# debugger when the active file is C#, and the `install.sh` tasks
+resolve the project from it.
 
 **Debugging** — function keys, as in Visual Studio (`fn` + key on Mac keyboards):
 
@@ -48,7 +60,7 @@ file is C#.
 | Toggle breakpoint | `F9` |
 | Step over / into / out | `F10` / `F11` / `shift-F11` |
 
-**Running without the debugger** — `cmd-alt-shift` + letter (no `fn`, no clashes with Zed defaults):
+**Running without the debugger** (with `install.sh`) — `cmd-alt-shift` + letter (no `fn`, no clashes with Zed defaults):
 
 | Action | Key |
 |---|---|
@@ -63,9 +75,10 @@ All tasks are also available from `task: spawn` (`cmd-shift-r`).
 
 ### Which project is used?
 
-Starting at the directory of the open file, the nearest `*.csproj` / `*.fsproj` upwards wins. If there is none,
-the workspace is searched and an executable project (Web / Worker / `OutputType` Exe) is preferred. Set the
-`DOTNET_PROJECT` environment variable on a task to force one.
+For a plain `dotnet` task, the one it names (`--project`, or the path given to `dotnet build`), else the one in
+its working directory. For the `install.sh` tasks, the nearest `*.csproj` / `*.fsproj` upwards from the open
+file; if there is none, the workspace is searched and an executable project (Web / Worker / `OutputType` Exe) is
+preferred. Set the `DOTNET_PROJECT` environment variable on a task to force one.
 
 ### Manual `debug.json`
 
@@ -90,12 +103,13 @@ the workspace is searched and an executable project (Web / Worker / `OutputType`
 ]
 ```
 
-Supported options: `program`, `args`, `cwd`, `env`, `stopAtEntry`, `justMyCode`, `enableStepFiltering`,
-`processId` (see `debug_adapter_schemas/netcoredbg.json`).
+Supported options: `program`, `args`, `cwd`, `env`, `launchProfile`, `stopAtEntry`, `justMyCode`,
+`enableStepFiltering`, `processId` (see `debug_adapter_schemas/netcoredbg.json`).
 
 ## Development
 
 ```sh
+cargo test                                   # parser tests (host)
 cargo build --release --target wasm32-wasip2
 ```
 

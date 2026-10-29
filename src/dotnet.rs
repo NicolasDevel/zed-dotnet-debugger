@@ -1,23 +1,267 @@
 use std::fs;
+use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 use zed_extension_api::{
     self as zed, BuildTaskDefinition, BuildTaskDefinitionTemplatePayload, BuildTaskTemplate,
     DebugAdapterBinary, DebugConfig, DebugRequest, DebugScenario, DebugTaskDefinition,
-    DownloadedFileType, LaunchRequest, StartDebuggingRequestArguments,
+    DownloadedFileType, EnvVars, LaunchRequest, StartDebuggingRequestArguments,
     StartDebuggingRequestArgumentsRequest, TaskTemplate, Worktree,
 };
 
 const ADAPTER_NAME: &str = "netcoredbg";
 const LOCATOR_NAME: &str = "dotnet";
 const NETCOREDBG_REPO: &str = "Samsung/netcoredbg";
-/// Helper script installed by `install.sh`; tasks invoke it as `sh <path>/dotnet-zed.sh <action> ...`.
+/// Optional helper script installed by `install.sh`; its tasks look like `sh <path>/dotnet-zed.sh <action> <root>`.
 const HELPER_SCRIPT: &str = "dotnet-zed.sh";
-/// Only `run` gets a debug scenario; `watch`/`restart` would debug the exact same program.
-const DEBUGGABLE_ACTIONS: &[&str] = &["run"];
+/// Written by the debug build (`-getResultOutputFile`) into the extension's work directory.
+const BUILD_RESULT_FILE: &str = "last-build.json";
 
 struct DotnetExtension {
     cached_netcoredbg: Option<String>,
+}
+
+/// What a `dotnet run|watch|build` task means for a debug session.
+#[derive(Default)]
+struct DotnetInvocation {
+    project: Option<String>,
+    framework: Option<String>,
+    /// `Some(None)` is `--no-launch-profile`.
+    launch_profile: Option<Option<String>>,
+    program_args: Vec<String>,
+}
+
+impl DotnetInvocation {
+    /// Parses `dotnet run|watch|build [options] [-- args]`, given as command + args.
+    fn parse(task: &TaskTemplate) -> Option<Self> {
+        let mut tokens = task
+            .command
+            .split_whitespace()
+            .map(String::from)
+            .chain(task.args.iter().cloned())
+            .peekable();
+        let program = tokens.next()?;
+        if program != "dotnet" && !program.ends_with("/dotnet") && !program.ends_with("\\dotnet.exe")
+        {
+            return None;
+        }
+        let verb = match tokens.next()?.as_str() {
+            "watch" => {
+                // `dotnet watch [run|build]`
+                if tokens.peek().is_some_and(|t| t == "run" || t == "build") {
+                    tokens.next();
+                }
+                "run"
+            }
+            "run" => "run",
+            "build" => "build",
+            _ => return None,
+        };
+
+        let mut invocation = Self::default();
+        while let Some(token) = tokens.next() {
+            let (flag, inline_value) = match token.split_once('=') {
+                Some((flag, value)) if flag.starts_with('-') => {
+                    (flag.to_string(), Some(value.to_string()))
+                }
+                _ => (token.clone(), None),
+            };
+            let mut value = || inline_value.clone().or_else(|| tokens.next());
+            match flag.as_str() {
+                "--" => invocation.program_args.extend(tokens.by_ref()),
+                "-p" | "--project" => invocation.project = value(),
+                "-f" | "--framework" => invocation.framework = value(),
+                "-lp" | "--launch-profile" => invocation.launch_profile = Some(value()),
+                "--no-launch-profile" => invocation.launch_profile = Some(None),
+                "-c" | "--configuration" | "-r" | "--runtime" | "-a" | "--arch" | "--os"
+                | "-v" | "--verbosity" | "-o" | "--output" | "-e" | "--environment" => {
+                    value();
+                }
+                _ if flag.starts_with('-') => {}
+                // `dotnet build <PROJECT>`; for `dotnet run`, stray positionals go to the app.
+                _ if verb == "build" && invocation.project.is_none() => {
+                    invocation.project = Some(token)
+                }
+                _ if verb == "run" => invocation.program_args.push(token),
+                _ => {}
+            }
+        }
+        Some(invocation)
+    }
+
+    /// Extra debug configuration, merged on top of what the locator resolves.
+    fn config(&self) -> Value {
+        let mut config = json!({});
+        if !self.program_args.is_empty() {
+            config["args"] = json!(self.program_args);
+        }
+        match &self.launch_profile {
+            Some(Some(name)) => config["launchProfile"] = name.clone().into(),
+            Some(None) => config["launchProfile"] = false.into(),
+            None => {}
+        }
+        config
+    }
+}
+
+fn build_result_path() -> Result<PathBuf, String> {
+    Ok(std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join(BUILD_RESULT_FILE))
+}
+
+/// MSBuild flags that make `dotnet build` report where the program ended up.
+fn build_result_args() -> Result<Vec<String>, String> {
+    Ok(vec![
+        "-c".into(),
+        "Debug".into(),
+        // Without an explicit target, -getProperty only evaluates the project.
+        "-t:Build".into(),
+        "-getProperty:TargetPath".into(),
+        "-getProperty:MSBuildProjectDirectory".into(),
+        format!("-getResultOutputFile:{}", build_result_path()?.display()),
+    ])
+}
+
+fn dotnet_build_task(
+    project: Option<String>,
+    framework: Option<String>,
+    cwd: Option<String>,
+    env: EnvVars,
+) -> Result<BuildTaskTemplate, String> {
+    let mut args = vec!["build".to_string()];
+    args.extend(project);
+    if let Some(framework) = framework {
+        args.extend(["-f".to_string(), framework]);
+    }
+    args.extend(build_result_args()?);
+    Ok(BuildTaskTemplate {
+        label: "dotnet: build (debug)".into(),
+        command: "dotnet".into(),
+        args,
+        env,
+        cwd,
+    })
+}
+
+fn debug_scenario(label: String, build: BuildTaskTemplate, config: Value) -> DebugScenario {
+    DebugScenario {
+        label,
+        adapter: ADAPTER_NAME.into(),
+        build: Some(BuildTaskDefinition::Template(
+            BuildTaskDefinitionTemplatePayload {
+                locator_name: Some(LOCATOR_NAME.into()),
+                template: build,
+            },
+        )),
+        config: config.to_string(),
+        tcp_connection: None,
+    }
+}
+
+/// Returns the helper script path and action if `task` is one of `install.sh`'s tasks.
+fn helper_invocation(task: &TaskTemplate) -> Option<(&str, &str)> {
+    if task.command != "sh" {
+        return None;
+    }
+    let script = task.args.first()?;
+    let action = task.args.get(1)?;
+    script
+        .ends_with(HELPER_SCRIPT)
+        .then_some((script.as_str(), action.as_str()))
+}
+
+fn request_kind(config: &Value) -> Result<StartDebuggingRequestArgumentsRequest, String> {
+    match config.get("request").and_then(Value::as_str) {
+        Some("launch") if config.get("program").is_some() => {
+            Ok(StartDebuggingRequestArgumentsRequest::Launch)
+        }
+        Some("launch") => Err("`program` is required for a netcoredbg launch".into()),
+        Some("attach") => Ok(StartDebuggingRequestArgumentsRequest::Attach),
+        Some(other) => Err(format!("unknown request `{other}`, expected launch or attach")),
+        None => Err("missing `request` (launch or attach)".into()),
+    }
+}
+
+/// Parses launchSettings.json as Visual Studio writes it: UTF-8 BOM and `//` comment lines allowed.
+fn parse_launch_settings(text: &str) -> Option<Value> {
+    let text = text.trim_start_matches('\u{feff}');
+    let without_comments: String = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_json::from_str(&without_comments).ok()
+}
+
+/// Applies the `Properties/launchSettings.json` profile of the program's `cwd`, like `dotnet run`.
+///
+/// `launchProfile` picks a profile by name (default: the first `Project` profile) or turns this
+/// off with `false`. Values already present in the configuration win over the profile.
+fn apply_launch_profile(configuration: &mut Value, worktree: &Worktree) {
+    let selection = configuration
+        .as_object_mut()
+        .and_then(|config| config.remove("launchProfile"));
+    if selection == Some(Value::Bool(false))
+        || configuration.get("request").and_then(Value::as_str) != Some("launch")
+    {
+        return;
+    }
+    let Some(cwd) = configuration.get("cwd").and_then(Value::as_str) else {
+        return;
+    };
+    let root = worktree.root_path();
+    let Some(relative) = cwd.strip_prefix(root.as_str()) else {
+        return;
+    };
+    let relative = relative.trim_start_matches(['/', '\\']);
+    let path = if relative.is_empty() {
+        "Properties/launchSettings.json".to_string()
+    } else {
+        format!("{relative}/Properties/launchSettings.json")
+    };
+    let Some(settings) = worktree
+        .read_text_file(&path)
+        .ok()
+        .and_then(|text| parse_launch_settings(&text))
+    else {
+        return;
+    };
+    let Some(profiles) = settings.get("profiles").and_then(Value::as_object) else {
+        return;
+    };
+    let profile = match selection.as_ref().and_then(Value::as_str) {
+        Some(name) => profiles.get(name),
+        None => profiles
+            .values()
+            .find(|p| p.get("commandName").and_then(Value::as_str) == Some("Project")),
+    };
+    let Some(profile) = profile else {
+        return;
+    };
+
+    let mut env: Map<String, Value> = profile
+        .get("environmentVariables")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(urls) = profile.get("applicationUrl").and_then(Value::as_str) {
+        env.entry("ASPNETCORE_URLS").or_insert_with(|| urls.into());
+    }
+    if let Some(existing) = configuration.get("env").and_then(Value::as_object) {
+        env.extend(existing.clone());
+    }
+    if !env.is_empty() {
+        configuration["env"] = env.into();
+    }
+
+    let has_args = configuration
+        .get("args")
+        .and_then(Value::as_array)
+        .is_some_and(|args| !args.is_empty());
+    if !has_args && let Some(args) = profile.get("commandLineArgs").and_then(Value::as_str) {
+        configuration["args"] = json!(args.split_whitespace().collect::<Vec<_>>());
+    }
 }
 
 impl DotnetExtension {
@@ -103,75 +347,6 @@ impl DotnetExtension {
     }
 }
 
-/// Returns the helper script path and action if `task` is one of our `dotnet-zed.sh` tasks.
-fn helper_invocation(task: &TaskTemplate) -> Option<(&str, &str)> {
-    if task.command != "sh" {
-        return None;
-    }
-    let script = task.args.first()?;
-    let action = task.args.get(1)?;
-    script
-        .ends_with(HELPER_SCRIPT)
-        .then_some((script.as_str(), action.as_str()))
-}
-
-fn request_kind(config: &Value) -> Result<StartDebuggingRequestArgumentsRequest, String> {
-    match config.get("request").and_then(Value::as_str) {
-        Some("launch") if config.get("program").is_some() => {
-            Ok(StartDebuggingRequestArgumentsRequest::Launch)
-        }
-        Some("launch") => Err("`program` is required for a netcoredbg launch".into()),
-        Some("attach") => Ok(StartDebuggingRequestArgumentsRequest::Attach),
-        Some(other) => Err(format!("unknown request `{other}`, expected launch or attach")),
-        None => Err("missing `request` (launch or attach)".into()),
-    }
-}
-
-/// Parses launchSettings.json as Visual Studio writes it: UTF-8 BOM and `//` comment lines allowed.
-fn parse_launch_settings(text: &str) -> Option<Value> {
-    let text = text.trim_start_matches('\u{feff}');
-    let without_comments: String = text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    serde_json::from_str(&without_comments).ok()
-}
-
-/// Builds the env/args VS would use from the first `Project` profile in launchSettings.json.
-fn launch_profile(launch_settings: &Value) -> (Vec<(String, String)>, Vec<String>) {
-    let mut envs = Vec::new();
-    let mut args = Vec::new();
-    let Some(profile) = launch_settings
-        .get("profiles")
-        .and_then(Value::as_object)
-        .and_then(|profiles| {
-            profiles
-                .values()
-                .find(|p| p.get("commandName").and_then(Value::as_str) == Some("Project"))
-        })
-    else {
-        return (envs, args);
-    };
-
-    if let Some(vars) = profile.get("environmentVariables").and_then(Value::as_object) {
-        for (key, value) in vars {
-            if let Some(value) = value.as_str() {
-                envs.push((key.clone(), value.to_string()));
-            }
-        }
-    }
-    if let Some(urls) = profile.get("applicationUrl").and_then(Value::as_str)
-        && !envs.iter().any(|(key, _)| key == "ASPNETCORE_URLS")
-    {
-        envs.push(("ASPNETCORE_URLS".into(), urls.to_string()));
-    }
-    if let Some(cmd_args) = profile.get("commandLineArgs").and_then(Value::as_str) {
-        args.extend(cmd_args.split_whitespace().map(String::from));
-    }
-    (envs, args)
-}
-
 impl zed::Extension for DotnetExtension {
     fn new() -> Self {
         Self {
@@ -189,9 +364,10 @@ impl zed::Extension for DotnetExtension {
         if adapter_name != ADAPTER_NAME {
             return Err(format!("unknown debug adapter `{adapter_name}`"));
         }
-        let configuration: Value = serde_json::from_str(&config.config)
+        let mut configuration: Value = serde_json::from_str(&config.config)
             .map_err(|e| format!("invalid netcoredbg configuration: {e}"))?;
         let request = request_kind(&configuration)?;
+        apply_launch_profile(&mut configuration, worktree);
         let command = self.netcoredbg_path(user_provided_debug_adapter_path, worktree)?;
 
         Ok(DebugAdapterBinary {
@@ -217,6 +393,18 @@ impl zed::Extension for DotnetExtension {
 
     fn dap_config_to_scenario(&mut self, config: DebugConfig) -> Result<DebugScenario, String> {
         let configuration = match config.request {
+            // A project rather than a compiled program: build it, then debug its output.
+            DebugRequest::Launch(launch)
+                if launch.program.ends_with(".csproj") || launch.program.ends_with(".fsproj") =>
+            {
+                let build =
+                    dotnet_build_task(Some(launch.program), None, launch.cwd, launch.envs)?;
+                let mut extra = json!({ "stopAtEntry": config.stop_on_entry.unwrap_or(false) });
+                if !launch.args.is_empty() {
+                    extra["args"] = json!(launch.args);
+                }
+                return Ok(debug_scenario(config.label, build, extra));
+            }
             DebugRequest::Launch(launch) => {
                 let mut value = json!({
                     "request": "launch",
@@ -260,105 +448,153 @@ impl zed::Extension for DotnetExtension {
         &mut self,
         locator_name: String,
         build_task: TaskTemplate,
-        _resolved_label: String,
+        resolved_label: String,
         _debug_adapter_name: String,
     ) -> Option<DebugScenario> {
         if locator_name != LOCATOR_NAME {
             return None;
         }
-        let (script, action) = helper_invocation(&build_task)?;
-        if !DEBUGGABLE_ACTIONS.contains(&action) {
-            return None;
+
+        if let Some((script, action)) = helper_invocation(&build_task) {
+            // Only `run`: watch/build/stop would debug the same program, or nothing.
+            if action != "run" {
+                return None;
+            }
+            let mut args = vec![script.to_string(), "build".to_string()];
+            args.extend(build_task.args.get(2).cloned());
+            args.extend(build_result_args().ok()?);
+            let build = BuildTaskTemplate {
+                label: "dotnet: build (debug)".into(),
+                command: build_task.command.clone(),
+                args,
+                env: build_task.env.clone(),
+                cwd: build_task.cwd.clone(),
+            };
+            return Some(debug_scenario("dotnet: debug".into(), build, json!({})));
         }
 
-        // Same invocation, but only build; the locator resolves the output afterwards.
-        let mut args = vec![script.to_string(), "build".to_string()];
-        args.extend(build_task.args.iter().skip(2).cloned());
-        let build = BuildTaskTemplate {
-            label: "dotnet: build (debug)".into(),
-            command: build_task.command.clone(),
-            args,
-            env: build_task.env.clone(),
-            cwd: build_task.cwd.clone(),
-        };
-
-        Some(DebugScenario {
-            label: "dotnet: debug".into(),
-            adapter: ADAPTER_NAME.into(),
-            build: Some(BuildTaskDefinition::Template(
-                BuildTaskDefinitionTemplatePayload {
-                    locator_name: Some(LOCATOR_NAME.into()),
-                    template: build,
-                },
-            )),
-            config: "{}".into(),
-            tcp_connection: None,
-        })
+        let invocation = DotnetInvocation::parse(&build_task)?;
+        let build = dotnet_build_task(
+            invocation.project.clone(),
+            invocation.framework.clone(),
+            build_task.cwd.clone(),
+            build_task.env.clone(),
+        )
+        .ok()?;
+        Some(debug_scenario(
+            format!("Debug: {resolved_label}"),
+            build,
+            invocation.config(),
+        ))
     }
 
     fn run_dap_locator(
         &mut self,
         _locator_name: String,
-        build_task: TaskTemplate,
+        _build_task: TaskTemplate,
     ) -> Result<DebugRequest, String> {
-        let (script, _) = helper_invocation(&build_task)
-            .ok_or("not a dotnet-zed task; cannot locate the program to debug")?;
-        let root = build_task.args.get(2).cloned().unwrap_or_default();
-        // Args after `<script> build <root>` are forwarded to the program, like `dotnet run`.
-        let task_args: Vec<String> = build_task.args.iter().skip(3).cloned().collect();
-        let cwd = build_task.cwd.clone().unwrap_or_else(|| root.clone());
+        let path = build_result_path()?;
+        let text = fs::read_to_string(&path).map_err(|_| {
+            "the build did not report its output; the .NET SDK 8 or newer is required".to_string()
+        })?;
+        fs::remove_file(&path).ok();
 
-        let output = zed::process::Command::new("sh")
-            .args([
-                "-c",
-                "cd \"$0\" && exec sh \"$1\" info \"$2\"",
-                cwd.as_str(),
-                script,
-                root.as_str(),
-            ])
-            .envs(build_task.env.clone())
-            .output()?;
-        if output.status != Some(0) {
-            return Err(format!(
-                "failed to resolve the .NET project: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (msbuild, launch_settings) = stdout.split_once('\n').unwrap_or((&stdout, ""));
-        let msbuild: Value = serde_json::from_str(msbuild)
-            .map_err(|e| format!("unexpected MSBuild output from {HELPER_SCRIPT} info: {e}"))?;
-        let properties = &msbuild["Properties"];
+        let result: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("unexpected MSBuild result file: {e}"))?;
+        let properties = &result["Properties"];
         let program = properties["TargetPath"]
             .as_str()
             .filter(|path| !path.is_empty())
-            .ok_or("MSBuild did not report a TargetPath for the project")?
+            .ok_or(
+                "MSBuild did not report a TargetPath: build a single project (not a solution), \
+                 and pass -f <framework> if it targets several",
+            )?
             .to_string();
-        let project_dir = properties["MSBuildProjectDirectory"]
+        let cwd = properties["MSBuildProjectDirectory"]
             .as_str()
             .map(String::from);
 
-        let (mut envs, mut args) = parse_launch_settings(launch_settings)
-            .map(|settings| launch_profile(&settings))
-            .unwrap_or_default();
-        if !envs.iter().any(|(key, _)| key == "DOTNET_ENVIRONMENT") {
-            envs.push(("DOTNET_ENVIRONMENT".into(), "Development".into()));
-        }
-        if !envs.iter().any(|(key, _)| key == "ASPNETCORE_ENVIRONMENT") {
-            envs.push(("ASPNETCORE_ENVIRONMENT".into(), "Development".into()));
-        }
-        if !task_args.is_empty() {
-            args = task_args;
-        }
-
         Ok(DebugRequest::Launch(LaunchRequest {
             program,
-            cwd: project_dir,
-            args,
-            envs,
+            cwd,
+            args: Vec::new(),
+            envs: Vec::new(),
         }))
     }
 }
 
 zed::register_extension!(DotnetExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(command: &str, args: &[&str]) -> TaskTemplate {
+        TaskTemplate {
+            label: "test".into(),
+            command: command.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn parses_run_with_project_profile_and_program_args() {
+        let invocation = DotnetInvocation::parse(&task(
+            "dotnet",
+            &["run", "--project", "Api", "-c", "Release", "-lp", "https", "--", "--seed", "1"],
+        ))
+        .unwrap();
+        assert_eq!(invocation.project.as_deref(), Some("Api"));
+        assert_eq!(invocation.program_args, ["--seed", "1"]);
+        assert_eq!(
+            invocation.config(),
+            json!({ "args": ["--seed", "1"], "launchProfile": "https" })
+        );
+    }
+
+    #[test]
+    fn parses_command_with_inline_verb_like_the_csharp_extension() {
+        let invocation =
+            DotnetInvocation::parse(&task("dotnet build", &["/repo/Api/Api.csproj"])).unwrap();
+        assert_eq!(invocation.project.as_deref(), Some("/repo/Api/Api.csproj"));
+        assert!(invocation.program_args.is_empty());
+    }
+
+    #[test]
+    fn parses_watch_and_inline_option_values() {
+        let invocation = DotnetInvocation::parse(&task(
+            "dotnet",
+            &["watch", "run", "--project=Api", "--framework=net8.0", "--no-launch-profile"],
+        ))
+        .unwrap();
+        assert_eq!(invocation.project.as_deref(), Some("Api"));
+        assert_eq!(invocation.framework.as_deref(), Some("net8.0"));
+        assert_eq!(invocation.config(), json!({ "launchProfile": false }));
+    }
+
+    #[test]
+    fn ignores_other_commands() {
+        assert!(DotnetInvocation::parse(&task("dotnet", &["test"])).is_none());
+        assert!(DotnetInvocation::parse(&task("cargo", &["run"])).is_none());
+        assert!(DotnetInvocation::parse(&task("dotnet restore", &["x.csproj"])).is_none());
+    }
+
+    #[test]
+    fn helper_tasks_are_recognized() {
+        let helper = task("sh", &["/home/u/.config/zed/dotnet/dotnet-zed.sh", "run", "/repo"]);
+        assert_eq!(
+            helper_invocation(&helper),
+            Some(("/home/u/.config/zed/dotnet/dotnet-zed.sh", "run"))
+        );
+        assert!(DotnetInvocation::parse(&helper).is_none());
+    }
+
+    #[test]
+    fn launch_settings_with_bom_and_comments() {
+        let text = "\u{feff}{\n  // comment\n  \"profiles\": { \"http\": { \"commandName\": \"Project\" } }\n}";
+        let settings = parse_launch_settings(text).unwrap();
+        assert_eq!(settings["profiles"]["http"]["commandName"], "Project");
+    }
+}

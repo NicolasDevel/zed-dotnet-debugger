@@ -1,7 +1,7 @@
 #!/bin/sh
-# Helper used by the Zed .NET tasks and by the extension's debug locator.
+# Helper behind the optional Zed tasks installed by install.sh.
 #
-#   dotnet-zed.sh <run|watch|build|stop|info> <worktree-root> [args...]
+#   dotnet-zed.sh <run|watch|build|stop> <worktree-root> [args...]
 #
 # The project is resolved from the current directory (the task cwd, i.e. the
 # directory of the open file), walking up until a *.csproj is found. If there
@@ -65,27 +65,16 @@ case "$action" in
         cd "$project_dir" && exec dotnet watch --project "$project" run ${1:+--} "$@"
         ;;
     build)
-        # Extra args are program args (forwarded by the debugger), not build args.
-        echo "▶ dotnet build -c Debug  ($project)"
-        exec dotnet build "$project" -c Debug
+        # Extra args are MSBuild args (the debugger passes -getResultOutputFile etc.).
+        echo "▶ dotnet build  ($project)"
+        exec dotnet build "$project" "$@"
         ;;
     stop)
         stop_project
         echo "■ stopped ($project)"
         ;;
-    info)
-        # Machine-readable output for the debug locator:
-        #   line 1: MSBuild properties as JSON; rest: raw launchSettings.json (may be absent).
-        dotnet msbuild "$project" -nologo -p:Configuration=Debug \
-            -getProperty:TargetPath -getProperty:MSBuildProjectDirectory -getProperty:RunArguments \
-            | tr -d '\r\n'
-        printf '\n'
-        launch_settings="$project_dir/Properties/launchSettings.json"
-        [ -f "$launch_settings" ] && cat "$launch_settings"
-        exit 0
-        ;;
     *)
-        echo "usage: dotnet-zed.sh <run|watch|build|stop|info> <worktree-root> [args...]" >&2
+        echo "usage: dotnet-zed.sh <run|watch|build|stop> <worktree-root> [args...]" >&2
         exit 2
         ;;
 esac

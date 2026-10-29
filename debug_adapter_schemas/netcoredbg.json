@@ -1,10 +1,15 @@
 {
   "type": "object",
-  "required": ["request"],
+  "required": [
+    "request"
+  ],
   "properties": {
     "request": {
       "type": "string",
-      "enum": ["launch", "attach"],
+      "enum": [
+        "launch",
+        "attach"
+      ],
       "description": "Launch a .NET program or attach to a running process."
     },
     "program": {
@@ -13,7 +18,9 @@
     },
     "args": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Command line arguments passed to the program."
     },
     "cwd": {
@@ -22,8 +29,17 @@
     },
     "env": {
       "type": "object",
-      "additionalProperties": { "type": "string" },
+      "additionalProperties": {
+        "type": "string"
+      },
       "description": "Environment variables for the program."
+    },
+    "launchProfile": {
+      "type": [
+        "string",
+        "boolean"
+      ],
+      "description": "Profile from Properties/launchSettings.json (under cwd) to take env, applicationUrl and commandLineArgs from. Defaults to the first `Project` profile; false disables it."
     },
     "stopAtEntry": {
       "type": "boolean",
@@ -41,18 +57,41 @@
       "description": "Step over properties and operators."
     },
     "processId": {
-      "type": ["integer", "string"],
+      "type": [
+        "integer",
+        "string"
+      ],
       "description": "Process id to attach to (request: attach). Use \"$ZED_PICK_PID\" to pick one."
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "request": { "const": "launch" } } },
-      "then": { "required": ["program"] }
+      "if": {
+        "properties": {
+          "request": {
+            "const": "launch"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "program"
+        ]
+      }
     },
     {
-      "if": { "properties": { "request": { "const": "attach" } } },
-      "then": { "required": ["processId"] }
+      "if": {
+        "properties": {
+          "request": {
+            "const": "attach"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "processId"
+        ]
+      }
     }
   ]
 }
