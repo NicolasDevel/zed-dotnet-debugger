@@ -491,8 +491,19 @@ impl zed::Extension for DotnetExtension {
     fn run_dap_locator(
         &mut self,
         _locator_name: String,
-        _build_task: TaskTemplate,
+        build_task: TaskTemplate,
     ) -> Result<DebugRequest, String> {
+        // Zed keeps recently used scenarios (with their build command) in memory, so after an
+        // update the debug panel can still offer one from an older version of this extension.
+        if !build_task
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("-getResultOutputFile:"))
+        {
+            return Err("this debug scenario comes from an older version of the .NET Debugger \
+                        extension; pick it again below the recent entries, or restart Zed"
+                .into());
+        }
         let path = build_result_path()?;
         let text = fs::read_to_string(&path).map_err(|_| {
             "the build did not report its output; the .NET SDK 8 or newer is required".to_string()
